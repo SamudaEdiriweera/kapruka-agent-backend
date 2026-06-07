@@ -10,6 +10,27 @@ Without a typed state, LangGraph doesn't know what data flows between nodes. Thi
 . Conversation continuity — cart and language persist across turns
 """
 
+
+"""
+Why each field exists
+
+messages       → full conversation history sent from frontend each turn
+cart           → list of {product_id, name, price, qty} — built up during session
+plan           → steps planner generates e.g. ["search", "show_cards", "ask_city"]
+current_step   → which plan step we're on
+language       → "en" | "si" | "tl" — detected and persisted
+intent         → what user wants to do
+missing_info   → what agent still needs before it can proceed
+delivery_info  → {city, delivery_date} for check_delivery call
+recipient      → {name, phone, address} — who receives the order
+sender         → {name, phone} — who is placing the order
+gift_message   → optional message to include with order
+_decision      → reasoner's output — tells router what to do next
+reflection     → reflector's verdict — "continue|replan|respond"
+last_tool_result → raw MCP response from last tool call
+response       → final structured JSON sent to frontend
+"""
+
 from typing import TypedDict, List, Optional, Any
 
 class ShoppingState(TypedDict):
@@ -31,14 +52,23 @@ class ShoppingState(TypedDict):
     # Detected intent:  "search_product" | "track_order" | "checkout" etc
     intent: str
 
-    # What info is still missing before agent can proceed
+    # What info is still missing before agent can proceed or can call a tool
     missing_info: List[str]
 
     # Delivery address + date collected from user
     delivery_info: dict
 
-    # Gift message collected from user
+    # Recipient info for kapruka_create_order
+    recipient: dict # {name, phone}
+
+    # Sender info for kapruka_create_order
+    sender: dict # {name, phone}
+
+    # Optional gift message for kapruka_create_order
     gift_message: str
+
+    # Reasoner's decision - used by conditional edge router
+    _decision: dict
 
     # Reflector's verdict - "continue" | "replan" | "respond"
     reflection: str
