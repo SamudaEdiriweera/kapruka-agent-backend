@@ -135,31 +135,43 @@ async def track_order(order_number: str):
 
 async def get_price_range_hints(q: str) -> dict:
     """
-    Quick search to get real price brackets from Kapruka's live catalog.
-    Used to show accurate price range quick replies to user.
+    Searches Kapruka for real prices.
+    Returns both brackets AND raw products to cache.
+    Aviods a second MCP call when user picks budget.
     """
-    
-    try: 
-        result = await search_products(q=q, limit=6)
+    try:
+        result = await search_products(q=q, limit=12)
         products = result.get("products", [])
         prices = [p["price"] for p in products if "price" in p]
 
         if not prices:
-            return {}
+            return {"brackets": [], "products": []}
         
         min_p = min(prices)
         max_p = max(prices)
-        mid = (min_p + max_p) / 2
+
+        # Build 4 smart brackets from real price distribution
+        sorted_prices = sorted(prices)
+        p25 = sorted_prices[len(sorted_prices) // 4]
+        p50 = sorted_prices[len(sorted_prices) // 2]
+        p75 = sorted_prices[(len(sorted_prices) * 3) // 4]
+
+        brackets = [
+            f"Under LKR {int(p25):,}",
+            f"LKR {int(p25):,}-{int(p50):,}",
+            f"LKR {int(p50):,}–{int(p75):,}",
+            f"Above LKR {int(p75):,}"
+        ]
 
         return {
+            "brackets": brackets,
+            "products": products,  # cache these
             "min": min_p,
-            "max": max_p,
-            "brackets": [
-                f"Under LKR {int(min_p):,}",
-                f"LKR {int(min_p):,}-{int(mid):,}",
-                f"LKR {int(mid):,}-{int(max_p):,}",
-                f"Above LKR {int(max_p):,}"
-            ]
+            "max": max_p
         }
     except:
-        return {}
+        return {
+            "brackets": [],
+            "products": []
+        
+        }
