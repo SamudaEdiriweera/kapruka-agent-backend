@@ -66,7 +66,19 @@ async def detector_node(state: ShoppingState) -> ShoppingState:
         "missing_info": ["city", "delivery_date", "recipient_name", "recipient_phone", "sender_name", "sender_phone"]
     }}
 
-    missing_info should only include fields actually needed for the detectedd intent that are not in the conversation yet.
+    Rules for missing_info:
+    - intent is search_product AND no budget mentioned → add "price_range"
+    - intent is search_product AND no brand mentioned → add "brand"
+    - intent is check_delivery or create_order AND no city → add "city"
+    - intent is check_delivery or create_order AND no date → add "delivery_date"
+    - intent is create_order AND no recipient name → add "recipient_name"
+    - intent is create_order AND no recipient phone → add "recipient_phone"
+    - intent is create_order AND no sender name → add "sender_name"
+    - intent is create_order AND no sender phone → add "sender_phone"
+    - Only include genuinely missing fields
+
+Important order: always put "price_range" before "brand" in missing_info
+so price is asked first, brand second.
 
 """
     
@@ -208,6 +220,44 @@ Rules:
         except:
             pass
 
+    available_brands = state.get("available_brands", [])
+    brand_quick_replies = []
+
+    if "brand" in missing:
+        # Use already cached products from price range step
+        if cached_products:
+            available_brands = tools.extract_brands(cached_products)
+            brand_quick_replies = available_brands
+        else:
+            # No cache yet — do a quick search to get brands
+            subject_res = llm.invoke([
+                SystemMessage(content=KAPRU_SYSTEM_PROMPT),
+                HumanMessage(content=f"""Extract product name from: "{last_msg}"
+    Return plain text only.""")
+            ])
+            subject = subject_res.content.strip()
+            hints = await tools.get_price_range_hints(subject)
+            
+            if hints.get("products"):
+                cached_products = hints["products"]
+                available_brands = tools.extract_brands(cached_products)
+                brand_quick_replies = available_brands
+
+    selected_brand = state.get("selected_brand", "")
+    if "brand" in missing and len(state["messages"]) > 1:
+        if last_msg.lower() != "any brand":
+            selected_brand = last_msg.strip()
+        else:
+            selected_brand = ""  # no brand filter
+
+        # Filter cached products by selected brand
+        if cached_products and selected_brand:
+            cached_products = [
+                p for p in cached_products
+                if selected_brand.lower() in
+                (p.get("brand", "") + p.get("name", "")).lower()
+            ]            
+
     # ── Step 3: Main reasoning decision ───────────────────────────
     
     prompt = f"""You are deciding the next action for kapru.
@@ -219,6 +269,8 @@ Rules:
     Cart: {state['cart']}
     Missing info: {state['missing_info']}
     Price range collected: {price_range}
+    Selected brand: {selected_brand}
+    Available brands: {available_brands}
     Cached products available: {len(cached_products) > 0}
     Delivery info: {state['delivery_info']}
     Recipient: {state['recipient']}
@@ -231,16 +283,22 @@ Rules:
     "tool": "kapruka_search_products | kapruka_get_product | kapruka_list_categories | kapruka_list_delivery_cities | kapruka_check_delivery | kapruka_create_order | kapruka_track_order | null",
     "tool_params": {{}},
     "clarify_question": "warm question in user's language ({state['language']})"
-    "quick_replies": {price_quick_replies if price_quick_replies else []},
+    "quick_replies": [],
     "reasoning": "brief reason"
     }}
 
     Rules:
-    - "price_range" in missing → action: clarify, quick_replies: {price_quick_replies}
-    - Other missing fields needed → action: clarify
-    - cached_products available AND price_range just collected → action: respond (use cache, skip MCP)
-    - All info available and no cache → action: call_tool with min_price/max_price
-    - kapruka_search_products params: q, min_price, max_price from {price_range}
+    - "price_range" in missing → action: clarify
+        quick_replies: {price_quick_replies}
+    - "brand" in missing → action: clarify
+        quick_replies: {brand_quick_replies}
+    - Both missing → ask price_range first, brand second
+    - cached products + price + brand collected → action: respond using cache
+    - No cache → action: call_tool
+    kapruka_search_products params:
+        q: subject + selected_brand if any
+        min_price: {price_range.get('min_price')}
+        max_price: {price_range.get('max_price')}
     - Plan complete → action: respond
 
     Personality: Warm, Sri Lankan, use Aney/Aiyo naturally.
@@ -257,7 +315,9 @@ Rules:
         **state,
         "_decision": decision,
         "price_range": price_range,
-        "cached_products": cached_products
+        "cached_products": cached_products,
+        "available_brands": available_brands,
+        "selected_brand": selected_brand
 
     }
 
