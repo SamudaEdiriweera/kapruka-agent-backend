@@ -55,6 +55,18 @@ class ShoppingState(TypedDict):
     # What info is still missing before agent can proceed or can call a tool
     missing_info: List[str]
 
+    # Price range collected from user
+    price_range: dict  # { min_price: float, max_price: float | None }
+
+    # Temporary product cache — avoids double MCP calls
+    cached_products: List[dict]
+
+    # Selected brand filter
+    selected_brand: str
+
+    # Available brands extracted from cached products  
+    available_brands: List[str]
+
     # Delivery address + date collected from user
     delivery_info: dict
 
