@@ -175,3 +175,19 @@ async def get_price_range_hints(q: str) -> dict:
             "products": []
         
         }
+    
+def extract_brands(products: list) -> list:
+    """
+    Extract unique brand names from cached product list.
+    Cleans and deduplicates brand names.
+    """
+    brands = set()
+    for p in products:
+        # Try brand field first, fallback to first word of name
+        brand = p.get("brand") or p.get("name", "").split()[0]
+        if brand and len(brand) > 1:
+            brands.add(brand.strip())
+    
+    brands_list = sorted(list(brands))[:6]  # max 6 brands
+    brands_list.append("Any brand")         # always add this option
+    return brands_list
