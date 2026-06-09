@@ -132,3 +132,34 @@ async def track_order(order_number: str):
             "order_number": order_number
         }
     )
+
+async def get_price_range_hints(q: str) -> dict:
+    """
+    Quick search to get real price brackets from Kapruka's live catalog.
+    Used to show accurate price range quick replies to user.
+    """
+    
+    try: 
+        result = await search_products(q=q, limit=6)
+        products = result.get("products", [])
+        prices = [p["price"] for p in products if "price" in p]
+
+        if not prices:
+            return {}
+        
+        min_p = min(prices)
+        max_p = max(prices)
+        mid = (min_p + max_p) / 2
+
+        return {
+            "min": min_p,
+            "max": max_p,
+            "brackets": [
+                f"Under LKR {int(min_p):,}",
+                f"LKR {int(min_p):,}-{int(mid):,}",
+                f"LKR {int(mid):,}-{int(max_p):,}",
+                f"Above LKR {int(max_p):,}"
+            ]
+        }
+    except:
+        return {}
