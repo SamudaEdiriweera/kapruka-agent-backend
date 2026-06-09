@@ -131,9 +131,85 @@ async def reasoner_node(state: ShoppingState) -> ShoppingState:
     """ 
     Looks at current plan stop + state.
     Decides: call a tool, ask user for missing info, or respond.
+    Dynamically generates price brackets from live Kapruka data.
+    Caches products to avoid double MCP calls.
     """
     current_plan_step = state["plan"][state["current_step"]] if state["plan"] else "respond"
+    last_msg = get_last_user_message(state)
+    missing = state.get("missing_info", [])
+    price_quick_replies = []
+    cached_products = state.get("cached_products", [])
 
+    # ── Step 1: Real price brackets from Kapruka ──────────────────
+    if "price_range" in missing:
+
+        # Extract subject cleanly
+        subject_res = llm.invoke([
+            SystemMessage(content=KAPRU_SYSTEM_PROMPT),
+            HumanMessage(content=f"""Extract only the product name from: "{last_msg}"
+                         Return plain text only. No explanation.""")
+        ])
+        subject = subject_res.content.strip()
+
+        # Fetch real prices + cached products
+        hints = await tools.get_price_range_hints(subject)
+        price_quick_replies = hints.get("brackets", [])
+
+        # Cache the products so we don't call MCP again
+        if hints.get("products"):
+            cached_products = hints["products"]
+
+        # Fallback if MCP returned nothing
+        if not price_quick_replies:
+            fallback_res = llm.invoke([
+                SystemMessage(content=KAPRU_SYSTEM_PROMPT),
+                HumanMessage(content=f"""Generate 4 realistic LKR price brackets
+            for "{subject}" sold on Kapruka.lk Sri Lanka.
+            Return JOSN array of 4 strings only.
+            Example: ["Under LKR 500", "LKR 500–2,000", "LKR 2,000–5,000", "Above LKR 5,000"]""")
+            ])
+            try:
+                price_quick_replies = parse_llm_json(fallback_res.content)
+            except:
+                price_quick_replies = [
+                                        "Under LKR 1,000",
+                    "LKR 1,000-5,000",
+                    "LKR 5,000-15,000",
+                    "Above LKR 15,000"
+                ]
+
+    # ── Step 2: Parse price range from user's reply ────────────────
+    price_range = state.get("price_range", {})
+    if "price_range" in missing and len(state["messages"]) > 1:
+        parse_res = llm.invoke([
+            SystemMessage(content=KAPRU_SYSTEM_PROMPT),
+            HumanMessage(content=f"""User answered a budget question: "{last_msg}"
+Extract min and max LKR price. Return JSON only:
+{{"min_price": 0, "max_price": 5000}}
+Rules:
+- "under/below" → min_price: 0
+- "above/over" → max_price: null
+- "k" = thousands, "50k" = 50000
+- null if no upper limit""")
+        ])
+        try:
+            parsed_range = parse_llm_json(parse_res.content)
+            if parsed_range.get("min_price") is not None:
+                price_range = parsed_range
+                # Filter cached products by selected price range
+                if cached_products and price_range:
+                    min_p = price_range.get("min_price", 0)
+                    max_p = price_range.get("max_price")
+                    cached_products = [
+                        p for p in cached_products
+                        if p.get("price", 0) >= min_p
+                        and (max_p is None or p.get("price", 0) <= max_p)
+                    ]
+        except:
+            pass
+
+    # ── Step 3: Main reasoning decision ───────────────────────────
+    
     prompt = f"""You are deciding the next action for kapru.
 
     Current plan step: "{current_plan_step}"
@@ -142,6 +218,8 @@ async def reasoner_node(state: ShoppingState) -> ShoppingState:
     Language: {state['language']}
     Cart: {state['cart']}
     Missing info: {state['missing_info']}
+    Price range collected: {price_range}
+    Cached products available: {len(cached_products) > 0}
     Delivery info: {state['delivery_info']}
     Recipient: {state['recipient']}
     Last tool result summary: {str(state.get('last_tool_result', ''))[:300]}
@@ -152,15 +230,21 @@ async def reasoner_node(state: ShoppingState) -> ShoppingState:
     "action": "call_tool | clarify | respond",
     "tool": "kapruka_search_products | kapruka_get_product | kapruka_list_categories | kapruka_list_delivery_cities | kapruka_check_delivery | kapruka_create_order | kapruka_track_order | null",
     "tool_params": {{}},
-    "clarify_question": "question to ask user if action is clarify, in the user's language"
-    "quick_replies": ["option1", "option2"],
+    "clarify_question": "warm question in user's language ({state['language']})"
+    "quick_replies": {price_quick_replies if price_quick_replies else []},
     "reasoning": "brief reason"
     }}
 
     Rules:
-        - If missing_info is not empty and needed for next step -> action: clarify
-        - If tool_params are all available -> action: call_tool
-        - If plan is complete or no tool needed -> action: respon"""
+    - "price_range" in missing → action: clarify, quick_replies: {price_quick_replies}
+    - Other missing fields needed → action: clarify
+    - cached_products available AND price_range just collected → action: respond (use cache, skip MCP)
+    - All info available and no cache → action: call_tool with min_price/max_price
+    - kapruka_search_products params: q, min_price, max_price from {price_range}
+    - Plan complete → action: respond
+
+    Personality: Warm, Sri Lankan, use Aney/Aiyo naturally.
+"""
     
     res = llm.invoke([
         SystemMessage(content=KAPRU_SYSTEM_PROMPT),
@@ -171,7 +255,9 @@ async def reasoner_node(state: ShoppingState) -> ShoppingState:
 
     return {
         **state,
-        "_decision": decision
+        "_decision": decision,
+        "price_range": price_range,
+        "cached_products": cached_products
 
     }
 
