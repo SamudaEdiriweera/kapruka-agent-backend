@@ -36,6 +36,8 @@ class ChatRequest(BaseModel):
     selected_brand: Optional[str] = ""
     available_brands: Optional[List[str]] = []
     cached_products: Optional[List[dict]] = []
+    missing_info: Optional[List[str]] = []   # ← add this
+    intent: Optional[str] = ""               # ← add this
 
 
 # -------- CHAT ENDPOINT ----------
@@ -59,6 +61,8 @@ async def chat(req: ChatRequest):
             "recipient": req.recipient,
             "sender": req.sender,
             "gift_message": req.gift_message,
+            "missing_info": req.missing_info,   # ← add this
+            "intent": req.intent      ,          # ← add this
             "_decision": {},
             "reflection": "",
             "last_tool_result": None,
@@ -72,7 +76,6 @@ async def chat(req: ChatRequest):
         
         return {
             "response": result["response"],
-            # Return updated state fields so frontend can persist them
             "state": {
                 "cart": result["cart"],
                 "language": result["language"],
@@ -83,9 +86,10 @@ async def chat(req: ChatRequest):
                 "delivery_info": result["delivery_info"],
                 "recipient": result["recipient"],
                 "sender": result["sender"],
-                "gift_message": result["gift_message"]
+                "gift_message": result["gift_message"],
+                "missing_info": result["missing_info"],  # ← add this
+                "intent": result["intent"]               # ← add this
             }
-
         }
     
     except Exception as e:
