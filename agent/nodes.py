@@ -1,14 +1,14 @@
 """
 What this file does?
-This is the brain of the entire agent. 
+This is the brain of the entire agent.
 Five nodes, each with a specific job:
 
-    DETECTOR  → reads user message, detects language + intent
-    PLANNER   → builds a step-by-step shopping plan
-    REASONER  → decides what to do right now
-    TOOL CALLER → executes the right Kapruka MCP tool
-    REFLECTOR → checks if tool result was good, decides next move
-    RESPONDER → builds structured JSON for the frontend
+    DETECTOR  -> reads user message, detects language + intent
+    PLANNER   -> builds a step-by-step shopping plan
+    REASONER  -> decides what to do right now
+    TOOL CALLER -> executes the right Kapruka MCP tool
+    REFLECTOR -> checks if tool result was good, decides next move
+    RESPONDER -> builds structured JSON for the frontend
 """
 
 import json
@@ -25,31 +25,29 @@ load_dotenv()
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.5-flash",
     google_api_key=os.getenv("GEMINI_API_KEY"),
-    temperature=0.7
+    temperature=0.7,
 )
 
-KAPRU_SYSTEM_PROMPT = """You are Kapru, a warm and clever Sri Lankan shopping assistant for kapruka.
-You speak English, Sinhala(සිංහල), and Tanglish naturally.
+KAPRU_SYSTEM_PROMPT = """You are Kapru, a warm and clever Sri Lankan shopping assistant for Kapruka.
+You speak English, Sinhala (සිංහල), and Tanglish naturally.
 Always match the language the user is writing in.
 Be warm, helpful and local - like a smart friend, not a corporate bot.
 Use natural Sri Lankan expressions when appropriate (Aney, Aiyo, Machan etc).
-ALWAYS respond with valid JSON only. No markdown. No extra text. No Code fences. Just JSON.
+ALWAYS respond with valid JSON only. No markdown. No extra text. No code fences. Just JSON."""
 
-"""
 
-# ----- helpers ---------------------------------------------------
+# ── HELPERS ──────────────────────────────────────────────────────────────────
 
-def parse_llm_json(content: str) -> dict:
-    """ Safetly parse LLM JSON response. Handles both string and list content."""
-    # Handle list response from newer langchain-google-genai versions
+def parse_llm_json(content) -> dict:
+    """Safely parse LLM JSON response. Handles both string and list content."""
     if isinstance(content, list):
         content = " ".join([
             c.get("text", "") if isinstance(c, dict) else str(c)
             for c in content
         ])
-    
+
     clean = (
-        content.strip()
+        str(content).strip()
         .removeprefix("```json")
         .removeprefix("```")
         .removesuffix("```")
@@ -57,12 +55,14 @@ def parse_llm_json(content: str) -> dict:
     )
     return json.loads(clean)
 
+
 def get_last_user_message(state: ShoppingState) -> str:
-    """ Get the most recent user message from conversation history."""
+    """Get the most recent user message from conversation history."""
     for msg in reversed(state["messages"]):
         if msg.get("role") == "user":
             return msg.get("content", "")
     return ""
+
 
 def extract_text(content) -> str:
     """Extract plain text from LLM response regardless of type."""
@@ -73,44 +73,54 @@ def extract_text(content) -> str:
         ]).strip()
     return str(content).strip()
 
-# -------------- DETECTOR NODE --------------------------------
+
+# ── DETECTOR NODE ────────────────────────────────────────────────────────────
 
 async def detector_node(state: ShoppingState) -> ShoppingState:
     """
     Reads the latest user message.
     Detects: language, intent, subject, missing info.
+    If we are mid-flow (already collecting price/brand), preserve that missing_info
+    instead of re-detecting from scratch.
     """
     last_msg = get_last_user_message(state)
 
+    # If frontend already told us what we're waiting for, keep it.
+    incoming_missing = state.get("missing_info", [])
+    if incoming_missing:
+        # We're mid-conversation collecting info — don't reset.
+        return {
+            **state,
+            "language": state.get("language", "en"),
+            "intent": state.get("intent", "search_product"),
+            "missing_info": incoming_missing,
+        }
+
     prompt = f"""Analyze this message from a Kapruka shopping user: "{last_msg}"
 
-    Return JSON:
-    {{
-        "language": "en" | "si" | "tl",
-        "intent": "search_product | get_product | list_categories | check_delivery | create_order | track_order | add_to_cart | view_cart | general",
-        "subject": "external product name or topic or empty string",
-        "missing_info": ["city", "delivery_date", "recipient_name", "recipient_phone", "sender_name", "sender_phone"]
-    }}
+Return JSON:
+{{
+    "language": "en | si | tl",
+    "intent": "search_product | get_product | list_categories | check_delivery | create_order | track_order | add_to_cart | view_cart | general",
+    "subject": "extracted product name or topic or empty string",
+    "missing_info": []
+}}
 
-    Rules for missing_info:
-    - intent is search_product AND no budget mentioned → add "price_range"
-    - intent is search_product AND no brand mentioned → add "brand"
-    - intent is check_delivery or create_order AND no city → add "city"
-    - intent is check_delivery or create_order AND no date → add "delivery_date"
-    - intent is create_order AND no recipient name → add "recipient_name"
-    - intent is create_order AND no recipient phone → add "recipient_phone"
-    - intent is create_order AND no sender name → add "sender_name"
-    - intent is create_order AND no sender phone → add "sender_phone"
-    - Only include genuinely missing fields
+Rules for missing_info:
+- intent is search_product AND no budget mentioned -> add "price_range"
+- intent is search_product AND no brand mentioned -> add "brand"
+- intent is check_delivery or create_order AND no city -> add "city"
+- intent is check_delivery or create_order AND no date -> add "delivery_date"
+- intent is create_order AND no recipient name -> add "recipient_name"
+- intent is create_order AND no recipient phone -> add "recipient_phone"
+- intent is create_order AND no sender name -> add "sender_name"
+- intent is create_order AND no sender phone -> add "sender_phone"
+- Only include genuinely missing fields
+- Always put "price_range" before "brand" so price is asked first"""
 
-Important order: always put "price_range" before "brand" in missing_info
-so price is asked first, brand second.
-
-"""
-    
     res = llm.invoke([
         SystemMessage(content=KAPRU_SYSTEM_PROMPT),
-        HumanMessage(content=prompt)
+        HumanMessage(content=prompt),
     ])
 
     parsed = parse_llm_json(res.content)
@@ -119,10 +129,11 @@ so price is asked first, brand second.
         **state,
         "language": parsed.get("language", state.get("language", "en")),
         "intent": parsed.get("intent", "general"),
-        "missing_info": parsed.get("missing_info", [])
+        "missing_info": parsed.get("missing_info", []),
     }
 
-# -------------- PLANNER NODE --------------------------------
+
+# ── PLANNER NODE ─────────────────────────────────────────────────────────────
 
 async def planner_node(state: ShoppingState) -> ShoppingState:
     """
@@ -131,27 +142,25 @@ async def planner_node(state: ShoppingState) -> ShoppingState:
     """
     if state.get("plan") and state.get("reflection") != "replan":
         return state
-    
+
     prompt = f"""User intent: "{state['intent']}"
 Language: "{state['language']}"
 Cart: {state['cart']}
 Missing info: {state['missing_info']}
 Conversation: {state['messages'][-4:]}
 
-Buils a minimal shopping plan as a JSON array  of action strings.
+Build a minimal shopping plan as a JSON array of action strings.
 Available actions: search_product, get_product, list_categories, check_delivery,
 create_order, track_order, ask_missing_info, show_cart, respond
 
 Example for "send birthday cake":
 ["search_product", "show_cards", "ask_missing_info", "check_delivery", "ask_gift_message", "create_order", "show_confirmation"]
 
-Return only the JSON array.
+Return only the JSON array."""
 
-"""
-    
     res = llm.invoke([
         SystemMessage(content=KAPRU_SYSTEM_PROMPT),
-        HumanMessage(content=prompt)
+        HumanMessage(content=prompt),
     ])
 
     plan = parse_llm_json(res.content)
@@ -160,10 +169,11 @@ Return only the JSON array.
         **state,
         "plan": plan,
         "current_step": 0,
-        "reflection": ""
+        "reflection": "",
     }
 
-# --------------------- REASONER NODE ---------------------------
+
+# ── REASONER NODE ────────────────────────────────────────────────────────────
 
 async def reasoner_node(state: ShoppingState) -> ShoppingState:
     """
@@ -182,54 +192,54 @@ async def reasoner_node(state: ShoppingState) -> ShoppingState:
     selected_brand = state.get("selected_brand", "")
     available_brands = state.get("available_brands", [])
 
-    # ── Step 1: Parse price range from user reply FIRST ───────────
     prev_messages = state["messages"]
     asked_budget = any(
-        "budget" in m.get("content", "").lower() or
-        "price" in m.get("content", "").lower() or
-        "lkr" in m.get("content", "").lower()
+        "budget" in m.get("content", "").lower()
+        or "price" in m.get("content", "").lower()
+        or "lkr" in m.get("content", "").lower()
         for m in prev_messages
         if m.get("role") == "assistant"
     )
 
+    # ── Step 1: Parse price range from the user's reply ────────────
     if not price_range and asked_budget and "price_range" in missing:
-        parse_res = llm.invoke([
-            SystemMessage(content=KAPRU_SYSTEM_PROMPT),
-            HumanMessage(content=f"""User replied: "{last_msg}"
+        try:
+            parse_res = llm.invoke([
+                SystemMessage(content=KAPRU_SYSTEM_PROMPT),
+                HumanMessage(content=f"""User replied: "{last_msg}"
 They were answering a budget/price range question.
-Extract min and max price in LKR. Return JSON only:
+Extract min and max price in LKR. Return ONLY a JSON object:
 {{"min_price": 0, "max_price": 6000}}
 Rules:
-- "under/below X" → min_price: 0, max_price: X
-- "above/over X" → min_price: X, max_price: null
-- "X–Y" or "X-Y" → min_price: X, max_price: Y
-- "k" = thousands e.g. "50k" = 50000, "3,500" = 3500
-- Return null for max_price if no upper limit
-- If message doesn't look like a price → return {{}}""")
-        ])
-        try:
+- "under/below X" -> min_price 0, max_price X
+- "above/over X" -> min_price X, max_price null
+- any range "X-Y" or "X to Y" (any dash) -> min_price X, max_price Y
+- "k" means thousands: "50k" = 50000
+- ignore commas, LKR text, and currency words
+- if it is not a price at all -> {{"min_price": null, "max_price": null}}""")
+            ])
             parsed_range = parse_llm_json(parse_res.content)
             if parsed_range.get("min_price") is not None:
                 price_range = parsed_range
                 missing = [m for m in missing if m != "price_range"]
-                # Filter cached products by price range
-                if cached_products and price_range:
-                    min_p = price_range.get("min_price", 0)
+                # Filter cached products by the selected range
+                if cached_products:
+                    min_p = price_range.get("min_price", 0) or 0
                     max_p = price_range.get("max_price")
                     cached_products = [
                         p for p in cached_products
                         if p.get("price", 0) >= min_p
                         and (max_p is None or p.get("price", 0) <= max_p)
                     ]
-        except:
-            pass
+        except Exception as e:
+            print(f"[PRICE PARSE ERROR] {e}")
 
-    # ── Step 2: Get price brackets if still needed ─────────────────
+    # ── Step 2: Generate price brackets if still needed ────────────
     if "price_range" in missing:
         subject_res = llm.invoke([
             SystemMessage(content=KAPRU_SYSTEM_PROMPT),
             HumanMessage(content=f"""Extract only the product name from: "{last_msg}"
-Return plain text only. No explanation.""")
+Return plain text only. No explanation."""),
         ])
         subject = extract_text(subject_res.content)
 
@@ -240,38 +250,40 @@ Return plain text only. No explanation.""")
             cached_products = hints["products"]
 
         if not price_quick_replies:
-            fallback_res = llm.invoke([
-                SystemMessage(content=KAPRU_SYSTEM_PROMPT),
-                HumanMessage(content=f"""Generate 4 realistic LKR price brackets
-for "{subject}" sold on Kapruka.lk Sri Lanka.
-Return JSON array of 4 strings only.
-Example: ["Under LKR 500", "LKR 500–2,000", "LKR 2,000–5,000", "Above LKR 5,000"]""")
-            ])
             try:
+                fallback_res = llm.invoke([
+                    SystemMessage(content=KAPRU_SYSTEM_PROMPT),
+                    HumanMessage(content=f"""Generate 4 realistic LKR price brackets
+for "{subject}" sold on Kapruka.lk Sri Lanka.
+Return a JSON array of 4 strings only.
+Example: ["Under LKR 500", "LKR 500-2,000", "LKR 2,000-5,000", "Above LKR 5,000"]"""),
+                ])
                 price_quick_replies = parse_llm_json(fallback_res.content)
-            except:
+            except Exception:
                 price_quick_replies = [
                     "Under LKR 1,000",
-                    "LKR 1,000–5,000",
-                    "LKR 5,000–15,000",
-                    "Above LKR 15,000"
+                    "LKR 1,000-5,000",
+                    "LKR 5,000-15,000",
+                    "Above LKR 15,000",
                 ]
 
-    # ── Step 3: Parse brand ONLY after price is collected ──────────
+    # ── Step 3: Brand handling (only after price collected) ────────
     price_collected = bool(price_range.get("min_price") is not None)
 
     if "brand" in missing and price_collected:
         asked_brand = any(
-            "brand" in m.get("content", "").lower() or
-            "bakery" in m.get("content", "").lower() or
-            "prefer" in m.get("content", "").lower()
+            "brand" in m.get("content", "").lower()
+            or "bakery" in m.get("content", "").lower()
+            or "prefer" in m.get("content", "").lower()
             for m in prev_messages
             if m.get("role") == "assistant"
         )
 
         if asked_brand:
-            if last_msg.lower() in ["any brand", "search all", "any bakery",
-                                     "best for my budget", "no preference"]:
+            if last_msg.lower() in [
+                "any brand", "search all", "any bakery",
+                "best for my budget", "no preference",
+            ]:
                 selected_brand = ""
             else:
                 selected_brand = last_msg.strip()
@@ -280,11 +292,11 @@ Example: ["Under LKR 500", "LKR 500–2,000", "LKR 2,000–5,000", "Above LKR 5,
             if cached_products and selected_brand:
                 cached_products = [
                     p for p in cached_products
-                    if selected_brand.lower() in
-                    (p.get("brand", "") + p.get("name", "")).lower()
+                    if selected_brand.lower()
+                    in (p.get("brand", "") + p.get("name", "")).lower()
                 ]
         else:
-            # Need to ask brand — get real brands from cache or MCP
+            # Need to ask brand — derive real brands from cached products
             if cached_products:
                 available_brands = tools.extract_brands(cached_products)
                 brand_quick_replies = available_brands
@@ -292,7 +304,7 @@ Example: ["Under LKR 500", "LKR 500–2,000", "LKR 2,000–5,000", "Above LKR 5,
                 subject_res = llm.invoke([
                     SystemMessage(content=KAPRU_SYSTEM_PROMPT),
                     HumanMessage(content=f"""Extract product name from: "{last_msg}"
-Return plain text only.""")
+Return plain text only."""),
                 ])
                 subject = extract_text(subject_res.content)
                 hints = await tools.get_price_range_hints(subject)
@@ -304,8 +316,8 @@ Return plain text only.""")
             if not brand_quick_replies:
                 brand_quick_replies = ["Any brand"]
 
-    # ── Step 4: Main reasoning decision ───────────────────────────
-    prompt = f"""You are deciding the next action for Kapri,
+    # ── Step 4: Main reasoning decision ────────────────────────────
+    prompt = f"""You are deciding the next action for Kapru,
 a warm Sri Lankan shopping assistant.
 
 Current plan step: "{current_plan_step}"
@@ -318,7 +330,6 @@ Price range collected: {price_range}
 Price collected: {price_collected}
 Selected brand: {selected_brand}
 Available brands: {available_brands}
-Cached products available: {len(cached_products) > 0}
 Cached products count: {len(cached_products)}
 Delivery info: {state['delivery_info']}
 Recipient: {state['recipient']}
@@ -336,25 +347,20 @@ Decide next action. Return JSON:
 }}
 
 Rules:
-- "price_range" in missing → action: clarify, quick_replies: {price_quick_replies}
-- "brand" in missing AND price collected → action: clarify, quick_replies: {brand_quick_replies}
-- missing is empty AND cached_products available → action: respond (use cache, skip MCP call)
-- missing is empty AND no cache → action: call_tool
-  tool: kapruka_search_products
-  tool_params: {{
-    "q": "product name + selected brand if any",
-    "min_price": {price_range.get('min_price')},
-    "max_price": {price_range.get('max_price')}
-  }}
-- create_order step → action: call_tool, tool: kapruka_create_order
-- check_delivery step → action: call_tool, tool: kapruka_check_delivery
-- Plan complete → action: respond
+- "price_range" in missing -> action: clarify, quick_replies: {price_quick_replies}
+- "brand" in missing AND price collected -> action: clarify, quick_replies: {brand_quick_replies}
+- missing is empty AND cached products exist -> action: respond (use cache, do NOT call a tool)
+- missing is empty AND no cache -> action: call_tool
+  tool kapruka_search_products with tool_params q, min_price {price_range.get('min_price')}, max_price {price_range.get('max_price')}
+- create_order step -> action: call_tool, tool kapruka_create_order
+- check_delivery step -> action: call_tool, tool kapruka_check_delivery
+- Plan complete -> action: respond
 
-Personality: Warm Sri Lankan friend. Use Aney/Aiyo naturally."""
+Personality: warm Sri Lankan friend, use Aney/Aiyo naturally."""
 
     res = llm.invoke([
         SystemMessage(content=KAPRU_SYSTEM_PROMPT),
-        HumanMessage(content=prompt)
+        HumanMessage(content=prompt),
     ])
 
     decision = parse_llm_json(res.content)
@@ -366,22 +372,20 @@ Personality: Warm Sri Lankan friend. Use Aney/Aiyo naturally."""
         "cached_products": cached_products,
         "available_brands": available_brands,
         "selected_brand": selected_brand,
-        "missing_info": missing
+        "missing_info": missing,
     }
 
-# --------------------- TOOL CALLER ---------------------------
+
+# ── TOOL CALLER NODE ─────────────────────────────────────────────────────────
 
 async def tool_caller_node(state: ShoppingState) -> ShoppingState:
-    """
-    Executes the MCP tool decided by reasoner.
-    Updates cart if product was added.
-    Updates delivery_info / recipient from tool params.
-    """
+    """Executes the MCP tool decided by reasoner."""
     decision = state.get("_decision", {})
     tool_name = decision.get("tool")
     params = decision.get("tool_params", {})
 
     result = None
+    new_delivery = state.get("delivery_info", {})
 
     try:
         if tool_name == "kapruka_search_products":
@@ -392,36 +396,33 @@ async def tool_caller_node(state: ShoppingState) -> ShoppingState:
                 max_price=params.get("max_price"),
                 in_stock_only=params.get("in_stock_only", True),
                 limit=params.get("limit", 6),
-                currency=params.get("currency", "LKR")
+                currency=params.get("currency", "LKR"),
             )
-        
+
         elif tool_name == "kapruka_get_product":
             result = await tools.get_product(
                 product_id=params.get("product_id"),
-                currency=params.get("currency", "LKR")
+                currency=params.get("currency", "LKR"),
             )
 
         elif tool_name == "kapruka_list_categories":
-            result = await tools.list_categories(
-                depth=params.get("depth", 1)
-            )
+            result = await tools.list_categories(depth=params.get("depth", 1))
 
         elif tool_name == "kapruka_list_delivery_cities":
             result = await tools.list_delivery_cities(
                 query=params.get("query", ""),
-                limi=params.get("limit", 10)
+                limit=params.get("limit", 10),
             )
 
         elif tool_name == "kapruka_check_delivery":
             result = await tools.check_delivery(
                 city=params.get("city", ""),
                 delivery_date=params.get("delivery_date", ""),
-                product_id=params.get("product_id", "")
+                product_id=params.get("product_id", ""),
             )
-            # persist delivery info
-            state["delivery_info"] = {
+            new_delivery = {
                 "city": params.get("city"),
-                "delivery_date": params.get("delivery_date")
+                "delivery_date": params.get("delivery_date"),
             }
 
         elif tool_name == "kapruka_create_order":
@@ -431,12 +432,12 @@ async def tool_caller_node(state: ShoppingState) -> ShoppingState:
                 delivery=state["delivery_info"],
                 sender=state["sender"],
                 gift_message=state.get("gift_message", ""),
-                currency=params.get("currency", "LKR")
+                currency=params.get("currency", "LKR"),
             )
 
         elif tool_name == "kapruka_track_order":
             result = await tools.track_order(
-                order_number=params.get("order_number", "")
+                order_number=params.get("order_number", ""),
             )
 
     except Exception as e:
@@ -445,101 +446,97 @@ async def tool_caller_node(state: ShoppingState) -> ShoppingState:
     return {
         **state,
         "last_tool_result": result,
-        "current_step": state["current_step"] + 1
+        "delivery_info": new_delivery,
+        "current_step": state["current_step"] + 1,
     }
 
-# --------------------- REFLECTOR NODE ---------------------------
+
+# ── REFLECTOR NODE ───────────────────────────────────────────────────────────
 
 async def reflector_node(state: ShoppingState) -> ShoppingState:
-    """
-    Checks if last tool result was useful.
-    Decides: continue to next step, replan, or respond to user now. 
-    """
+    """Checks if last tool result was useful. Decides continue / replan / respond."""
     result_str = str(state.get("last_tool_result", ""))[:500]
 
     prompt = f"""Tool was called. Evaluate the result.
 
-    Tool result: {result_str}
-    Current step: {state['current_step']}
-    Plan: {state['plan']}
-    Cart: {state['cart']}
+Tool result: {result_str}
+Current step: {state['current_step']}
+Plan: {state['plan']}
+Cart: {state['cart']}
 
-    Decide next move. Return JSON:
-    {{
-        "status": "continue | replan | respond",
-        "reason": "brief reason"
-    }}
+Decide next move. Return JSON:
+{{"status": "continue | replan | respond", "reason": "brief reason"}}
 
-    Rules:
-    - "contine" -> result was good, move to next plan step
-    - "replan" -> result was empty/error, need a new plan
-    - "repond" -> we have enough to respond to user now
-    """
+Rules:
+- "continue" -> result was good, move to next plan step
+- "replan"   -> result was empty/error, need a new plan
+- "respond"  -> we have enough to respond to the user now"""
 
     res = llm.invoke([
         SystemMessage(content=KAPRU_SYSTEM_PROMPT),
-        HumanMessage(content=prompt)
+        HumanMessage(content=prompt),
     ])
 
     reflection = parse_llm_json(res.content)
 
     return {
         **state,
-        "reflection": reflection.get("status", "respond")
+        "reflection": reflection.get("status", "respond"),
     }
 
-# --------------------- RESPONDER NODE ---------------------------
+
+# ── RESPONDER NODE ───────────────────────────────────────────────────────────
 
 async def responder_node(state: ShoppingState) -> ShoppingState:
-    """
-    Builds the final strcutured JSON response for the frontend.
-    Matches one of the response types the frontend renders.
-    """
-
+    """Builds the final structured JSON response for the frontend."""
     decision = state.get("_decision", {})
+
+    # Prefer cached products for product_cards when available
+    products_context = state.get("cached_products", [])[:6]
 
     prompt = f"""Build a frontend response for Kapru.
 
-    Language: {state['language']}
-    Action decided: {decision.get('action')}
-    Clarify question: {decision.get('clarify_question', '')}
-    Quick replies: {decision.get('quick_replies', [])}
-    Last tool result: {str(state.get('last_tool_result', ''))[:600]}
-    Cart: {state['cart']}
-    Last 3 messages: {state['messages'][-3:]}
+Language: {state['language']}
+Action decided: {decision.get('action')}
+Clarify question: {decision.get('clarify_question', '')}
+Quick replies: {decision.get('quick_replies', [])}
+Products to show (from cache): {products_context}
+Last tool result: {str(state.get('last_tool_result', ''))[:600]}
+Cart: {state['cart']}
+Last 3 messages: {state['messages'][-3:]}
 
-    Return ONE of these JSON response types:
+Return ONE of these JSON response types:
 
-    product_cards (when showing search results):
-    {{"type":"product_cards","message":"...","products":[{{"id":"...","name":"...","price":0, "image":"...","rating":0.0,"badge":"..."}}],"quick_replies":[]}}
+product_cards (when showing search results — use the cached products above):
+{{"type":"product_cards","message":"...","products":[{{"id":"...","name":"...","price":0,"image":"...","rating":4.5,"badge":"..."}}],"quick_replies":[]}}
 
-    question (when asking user for info):
-    {{"type":"question","message":"...","quick_replies":["option1","option2"]}}
+question (when asking user for info):
+{{"type":"question","message":"...","quick_replies":["option1","option2"]}}
 
-    delivery (when showing check_delivery result):
-    {{"type":"delivery_quote","message":"...","quote":{{"city":"...","delivery_date":"...","fee":0,"arrives":"..."}}}}
+delivery_quote (when showing check_delivery result):
+{{"type":"delivery_quote","message":"...","quote":{{"city":"...","delivery_date":"...","fee":0,"arrives":"..."}}}}
 
-    cart_summary (when showing cart):
-    {{"type":"cart_summary","message":"...","items":[],"subtotal":0,"delivery_fee":0,"total":0}}
+cart_summary (when showing cart):
+{{"type":"cart_summary","message":"...","items":[],"subtotal":0,"delivery_fee":0,"total":0}}
 
-    order_confirmation (when order is created ):
-    {{"type":"order_confirmation","message":"...","order_id":"...","pay_link":"...","total":0,"delivery_time":"..."}}
+order_confirmation (when order is created):
+{{"type":"order_confirmation","message":"...","order_id":"...","pay_link":"...","total":0,"delivery_time":"..."}}
 
-    text (for general messages)
-    {{"type":"text","message":"..."}}
+text (for general messages):
+{{"type":"text","message":"..."}}
 
-    Respond in the user's language ({state['language']}).
-    Retuen only valid JSON. No markdown.
-"""
-    
+When building product_cards, map each cached product: id=product_id, name=name, price=price.
+Respond in the user's language ({state['language']}).
+Return only valid JSON. No markdown."""
+
     res = llm.invoke([
         SystemMessage(content=KAPRU_SYSTEM_PROMPT),
-        HumanMessage(content=prompt)
+        HumanMessage(content=prompt),
     ])
 
     response = parse_llm_json(res.content)
 
     return {
         **state,
-        "response": response
+        "response": response,
     }
