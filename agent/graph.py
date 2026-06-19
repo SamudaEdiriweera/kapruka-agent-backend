@@ -41,12 +41,25 @@ def route_reflector(state: ShoppingState) -> str:
     - contine -> back to reasoner for next step
     - replan -> back to planner
     - respond -> straight to responder
+
+    Hard loop guard: if we've run through the plan, force respond.
     """
+    # Stop after 2 failed attempts — show error to user instead of looping
+    if state.get("retry_count", 0) >= 2:
+        return "responder"
+
     status = state.get("reflection", "respond")
-    if status == "continue":
-        return "reasoner"
+    step = state.get("current_step", 0)
+    plan_len = len(state.get("plan", []))
+
+    # Loop guard — never exceed plan length
+    if step >= plan_len:
+        return "responder"
+
     if status == "replan":
         return "planner"
+    if status == "continue":
+        return "reasoner"
     return "responder"
 
 # ------- GRAPH -----------------------
@@ -76,8 +89,7 @@ def build_graph():
         "reasoner",
         route_reasoner,
         {
-            "tool_caller": "reasoner",
-            "planner": "planner",
+            "tool_caller": "tool_caller",   # ← fixed
             "responder": "responder"
         }
     )

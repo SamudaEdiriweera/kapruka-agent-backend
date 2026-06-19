@@ -85,6 +85,9 @@ class ShoppingState(TypedDict):
     # Reflector's verdict - "continue" | "replan" | "respond"
     reflection: str
 
+    # Number of failed tool attempts — prevents infinite replan loops
+    retry_count: int
+
     # Raw result from last MCP tool call
     last_tool_result: Any
 
