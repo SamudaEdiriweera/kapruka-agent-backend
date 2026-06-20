@@ -95,41 +95,50 @@ def extract_text(content) -> str:
         ]).strip()
     return str(content).strip()
 
+def _compute_missing(intent: str, state: ShoppingState, last_msg: str) -> list:
+    """Compute what info is needed for a given intent/phase."""
+    if intent == "search_product":
+        missing = []
+        if not state.get("price_range"):
+            missing.append("price_range")
+        return missing
+    if intent == "create_order":
+        missing = []
+        r = state.get("recipient", {})
+        s = state.get("sender", {})
+        d = state.get("delivery_info", {})
+        if not r.get("name"): missing.append("recipient_name")
+        if not r.get("phone"): missing.append("recipient_phone")
+        if not s.get("name"): missing.append("sender_name")
+        if not d.get("address"): missing.append("address")
+        if not d.get("city"): missing.append("city")
+        if not d.get("delivery_date"): missing.append("delivery_date")
+        return missing
+    return []
+
 
 # ── DETECTOR NODE ────────────────────────────────────────────────────────────
 
 async def detector_node(state: ShoppingState) -> ShoppingState:
     """
     Reads the latest user message.
-    Detects: language, intent, subject, missing info.
-    If we are mid-flow (already collecting price/brand), preserve that missing_info
-    instead of re-detecting from scratch.
+    Detects language + intent. Re-detects intent when the user shifts phase
+    (e.g. discovery -> checkout). Preserves missing_info ONLY within the same intent.
     """
     last_msg = get_last_user_message(state)
     print(f"\n🔍 [DETECTOR] msg: '{last_msg[:50]}'")
 
-
-    # If frontend already told us what we're waiting for, keep it.
-    incoming_missing = state.get("missing_info", [])
-    if incoming_missing:
-        # We're mid-conversation collecting info — don't reset.
-        return {
-            **state,
-            "language": state.get("language", "en"),
-            "intent": state.get("intent", "search_product"),
-            "missing_info": incoming_missing,
-        }
-
     prompt = f"""Analyze this message from a Kapruka shopping user: "{last_msg}"
+Recent conversation: {state['messages'][-4:]}
+Current cart has {len(state.get('cart', []))} item(s).
 
 Return JSON:
 {{
     "language": "detect and label as one of: en (English), si (Sinhala script),
                  si-tl (Sinhala in English letters), ta (Tamil script),
                  ta-tl (Tamil in English letters)",
-    "intent": "search_product | get_product | list_categories | check_delivery | create_order | track_order | add_to_cart | view_cart | general",
+    "intent": "search_product | add_to_cart | view_cart | check_delivery | get_product | list_categories | create_order | track_order | general",
     "subject": "extracted product name or empty string",
-    "missing_info": []
 }}
 
 Language detection examples:
@@ -140,16 +149,13 @@ Language detection examples:
 - "Enakku oru phone venum" -> ta-tl
 
 Rules for missing_info:
-- intent is search_product AND no budget mentioned -> add "price_range"
-- intent is search_product AND no brand mentioned -> add "brand"
-- intent is check_delivery or create_order AND no city -> add "city"
-- intent is check_delivery or create_order AND no date -> add "delivery_date"
-- intent is create_order AND no recipient name -> add "recipient_name"
-- intent is create_order AND no recipient phone -> add "recipient_phone"
-- intent is create_order AND no sender name -> add "sender_name"
-- intent is create_order AND no sender phone -> add "sender_phone"
-- Only include genuinely missing fields
-- Always put "price_range" before "brand" so price is asked first"""
+Intent rules:
+- buying/searching a product -> search_product
+- "add to cart", "add the first one", "I'll take that", taps a product -> add_to_cart
+- "show cart", "my cart", "view cart" -> view_cart
+- "checkout", "place order", "buy now", "confirm order", "I'm ready" -> create_order
+- giving name/phone/address/city during a checkout -> create_order
+- "track order" or an order number -> track_order"""
 
     res = llm.invoke([
         SystemMessage(content=KAPRU_SYSTEM_PROMPT),
@@ -158,12 +164,22 @@ Rules for missing_info:
 
     parsed = parse_llm_json(res.content)
 
-    print(f"🔍 [DETECTOR] lang={parsed.get('language')} intent={parsed.get('intent')} missing={parsed.get('missing_info')}")
+    new_intent = parsed.get("intent", "general")
+    prev_intent = state.get("intent", "")
+    incoming_missing = state.get("missing_info", [])
+
+        # Preserve missing_info ONLY if still in the same phase (same intent)
+    if new_intent == prev_intent and incoming_missing:
+        missing = incoming_missing
+    else:
+        missing = _compute_missing(new_intent, state, last_msg)
+
+    print(f"🔍 [DETECTOR] lang={parsed.get('language')} intent={new_intent} missing={missing}")
     return {
         **state,
         "language": parsed.get("language", state.get("language", "en")),
-        "intent": parsed.get("intent", "general"),
-        "missing_info": parsed.get("missing_info", []),
+        "intent": new_intent,
+        "missing_info": missing,
     }
 
 
@@ -236,6 +252,33 @@ async def reasoner_node(state: ShoppingState) -> ShoppingState:
     price_range = state.get("price_range", {})
     selected_brand = state.get("selected_brand", "")
     available_brands = state.get("available_brands", [])
+
+    # ── Add to cart handling ───────────────────────────────────────
+    cart = list(state.get("cart", []))
+    intent = state.get("intent", "")
+
+    if intent == "add_to_cart":
+        # Figure out which product the user wants from cached_products
+        add_res = llm.invoke([
+            SystemMessage(content=KAPRU_SYSTEM_PROMPT),
+            HumanMessage(content=f"""User said: "{last_msg}"
+Available products (cached): {[{'product_id': p['product_id'], 'name': p['name'], 'price': p['price']} for p in cached_products[:6]]}
+
+Which product do they want to add? Return JSON:
+{{"product_id": "...", "name": "...", "price": 0, "qty": 1}}
+If unclear, return {{"product_id": ""}}.""")
+        ])
+        try:
+            picked = parse_llm_json(add_res.content)
+            if picked.get("product_id"):
+                cart.append({
+                    "product_id": picked["product_id"],
+                    "name": picked.get("name", ""),
+                    "price": picked.get("price", 0),
+                    "qty": picked.get("qty", 1),
+                })
+        except Exception as e:
+            print(f"[ADD CART ERROR] {e}")
 
     print(f"\n🧠 [REASONER] step='{current_plan_step}' missing={missing}")
 
@@ -369,7 +412,7 @@ Return plain text only."""),
     sender = state.get("sender", {})
     delivery_info = state.get("delivery_info", {})
 
-    checkout_fields = {"city", "delivery_date", "recipient_name",
+    checkout_fields = {"city", "delivery_date", "address", "recipient_name",
                        "recipient_phone", "sender_name", "sender_phone"}
 
     if state.get("intent") == "create_order" and checkout_fields & set(missing):
@@ -416,6 +459,7 @@ Rules:
             if recipient.get("phone"): missing = [m for m in missing if m != "recipient_phone"]
             if sender.get("name"): missing = [m for m in missing if m != "sender_name"]
             if sender.get("phone"): missing = [m for m in missing if m != "sender_phone"]
+            if delivery_info.get("address"): missing = [m for m in missing if m != "address"]
             if delivery_info.get("city"): missing = [m for m in missing if m != "city"]
             if delivery_info.get("delivery_date"): missing = [m for m in missing if m != "delivery_date"]
         except Exception as e:
@@ -429,15 +473,16 @@ Current plan step: "{current_plan_step}"
 Full plan: {state['plan']}
 Step index: {state['current_step']}
 Language: {state['language']}
-Cart: {state['cart']}
+Cart: {cart}
 Missing info: {missing}
 Price range collected: {price_range}
 Price collected: {price_collected}
 Selected brand: {selected_brand}
 Available brands: {available_brands}
 Cached products count: {len(cached_products)}
-Delivery info: {state['delivery_info']}
-Recipient: {state['recipient']}
+Delivery info: {delivery_info}
+Recipient: {recipient}
+Sender: {sender}
 Last tool result: {str(state.get('last_tool_result', ''))[:300]}
 Last 3 messages: {state['messages'][-3:]}
 
@@ -452,6 +497,7 @@ Decide next action. Return JSON:
 }}
 
 Rules:
+- intent is add_to_cart -> action: respond (confirm item added, show cart summary)
 - "price_range" in missing -> action: clarify, quick_replies: {price_quick_replies}
 - "brand" in missing AND price collected -> action: clarify, quick_replies: {brand_quick_replies}
 - missing is empty AND cached products exist -> action: respond (use cache, do NOT call a tool)
@@ -475,6 +521,7 @@ Personality: warm Sri Lankan friend, use Aney/Aiyo naturally."""
     return {
         **state,
         "_decision": decision,
+        "cart": cart,                    # ← add
         "price_range": price_range,
         "cached_products": cached_products,
         "available_brands": available_brands,
