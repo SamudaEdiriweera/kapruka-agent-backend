@@ -32,6 +32,13 @@ load_dotenv()
 llm = ChatAnthropic(
     model="claude-sonnet-4-6",
     anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+    temperature=0.2,
+    max_tokens=1024,
+)
+
+llm_creative = ChatAnthropic(
+    model="claude-sonnet-4-6",
+    anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
     temperature=0.7,
 )
 
@@ -666,7 +673,7 @@ When building product_cards, map each cached product: id=product_id, name=name, 
 Respond in the user's language ({state['language']}).
 Return only valid JSON. No markdown."""
 
-    res = llm.invoke([
+    res = llm_creative.invoke([
         SystemMessage(content=KAPRU_SYSTEM_PROMPT),
         HumanMessage(content=prompt),
     ])
