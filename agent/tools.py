@@ -39,13 +39,18 @@ async def call_mcp(tool_name: str, params: dict) -> str:
     Call any Kapruka MCP tool. Returns the raw markdown text result.
     NOTE: Kapruka nests arguments under a 'params' key.
     """
-    async with mcp_session() as session:
-        result = await session.call_tool(tool_name, {"params": params})
-        texts = []
-        for block in result.content:
-            if hasattr(block, "text"):
-                texts.append(block.text)
-        return "\n".join(texts)
+    try:
+        async with mcp_session() as session:
+            result = await session.call_tool(tool_name, {"params": params})
+            texts = []
+            for block in result.content:
+                if hasattr(block, "text"):
+                    texts.append(block.text)
+            return "\n".join(texts)
+    except Exception as e:
+        # Surface the real error instead of a vague TaskGroup wrapper
+        print(f"[MCP ERROR] {tool_name}: {type(e).__name__}: {e}")
+        return f"Error: MCP call failed - {str(e)[:100]}"
 
 
 # ── MARKDOWN PARSER ──────────────────────────────────────────────────────────────
