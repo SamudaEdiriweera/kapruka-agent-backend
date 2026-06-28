@@ -13,10 +13,11 @@ and returns results as MARKDOWN TEXT, not JSON. So this file:
 
 import os
 import re
+import asyncio
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 load_dotenv()
 
@@ -28,7 +29,7 @@ MCP_URL = os.getenv("KAPRUKA_MCP_URL", "https://mcp.kapruka.com/mcp")
 @asynccontextmanager
 async def mcp_session():
     """Open an MCP session with proper handshake + session handling."""
-    async with streamablehttp_client(MCP_URL) as (read, write, _):
+    async with streamable_http_client(MCP_URL) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             yield session
@@ -105,6 +106,31 @@ def parse_products(markdown: str) -> list:
 
     return products
 
+def parse_product_detail(markdown: str) -> dict:
+    """Extract image + details from a get_product markdown response."""
+    detail = {}
+    img = re.search(r"\*\*Image\*\*:\s*(https?://\S+)", markdown)
+    if img:
+        detail["image"] = img.group(1).strip()
+    return detail
+
+
+async def enrich_with_images(products: list) -> list:
+    """Fetch each product's own image concurrently. Order + identity safe."""
+
+    async def fetch_one(prod):
+        pid = prod.get("product_id", "")
+        try:
+            raw = await get_product(pid)
+            detail = parse_product_detail(raw)
+            img = detail.get("image", "")
+            if img:
+                prod["image"] = img
+        except Exception as e:
+            print(f"[ENRICH ERROR] {pid}: {e}")
+        return prod
+
+    return await asyncio.gather(*[fetch_one(p) for p in products])
 
 # ── TOOL WRAPPERS ────────────────────────────────────────────────────────────────
 
@@ -136,7 +162,9 @@ async def search_products(
         params["max_price"] = max_price
 
     raw = await call_mcp("kapruka_search_products", params)
-    return {"products": parse_products(raw), "raw": raw}
+    products = parse_products(raw)
+    products = await enrich_with_images(products)   # ← add this
+    return {"products": products, "raw": raw}
 
 
 async def get_product(product_id: str, currency: str = "LKR") -> str:

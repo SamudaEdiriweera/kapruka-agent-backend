@@ -32,8 +32,11 @@ load_dotenv()
 #     max_tokens=1024,
 # )
 
+# gemini-3.1-flash-lite
+# gemini-3.5-flash
+
 llm_creative = ChatGoogleGenerativeAI(
-    model="gemini-3.5-flash",
+    model="gemini-3.1-flash-lite",
     google_api_key=os.getenv("GEMINI_API_KEY"),
     temperature=0.7,
     max_output_tokens=2048,   # ← ensure room for full product_cards JSON
@@ -137,10 +140,9 @@ def extract_text(content) -> str:
 def _compute_missing(intent: str, state: ShoppingState, last_msg: str) -> list:
     """Compute what info is needed for a given intent/phase."""
     if intent == "search_product":
-        missing = []
-        if not state.get("price_range"):
-            missing.append("price_range")
-        return missing
+        return []   # reasoner decides if budget fits — don't force it
+    if intent == "get_advice":
+        return []   # advice first, no budget question
     if intent == "create_order":
         missing = []
         r = state.get("recipient", {})
@@ -189,7 +191,10 @@ Language detection examples:
 
 Rules for missing_info:
 Intent rules:
-- buying/searching a product -> search_product
+- buying/searching a clear product (names a product) -> search_product
+- needs ADVICE, unsure what to buy, or emotional situation
+  ("I broke up", "what should I get my mom", "help me decide", "any ideas",
+   "I'm feeling...", "what do you suggest") -> get_advice
 - "add to cart", "add the first one", "I'll take that", taps a product -> add_to_cart
 - "show cart", "my cart", "view cart" -> view_cart
 - "checkout", "place order", "buy now", "confirm order", "I'm ready" -> create_order
@@ -245,6 +250,8 @@ create_order, track_order, ask_missing_info, show_cart, respond
 
 Example for "send birthday cake":
 ["search_product", "show_cards", "ask_missing_info", "check_delivery", "ask_gift_message", "create_order", "show_confirmation"]
+Example for "I broke up, what gift?":
+["respond"]   
 
 Return only the JSON array."""
 
@@ -295,6 +302,10 @@ async def reasoner_node(state: ShoppingState) -> ShoppingState:
     # ── Add to cart handling ───────────────────────────────────────
     cart = list(state.get("cart", []))
     intent = state.get("intent", "")
+
+    # ── Advice / emotional path: guide first, no budget jump ──
+    if intent == "get_advice":
+        missing = [m for m in missing if m != "price_range"]
 
     if intent == "add_to_cart":
         # Figure out which product the user wants from cached_products
@@ -365,7 +376,7 @@ Rules:
             print(f"[PRICE PARSE ERROR] {e}")
 
     # ── Step 2: Generate price brackets if still needed ────────────
-    if "price_range" in missing:
+    if "price_range" in missing and intent == "search_product":
         subject_res = llm.invoke([
             SystemMessage(content=KAPRU_SYSTEM_PROMPT),
             HumanMessage(content=f"""Extract only the product name from: "{last_msg}"
@@ -455,58 +466,73 @@ Return plain text only."""),
                        "recipient_phone", "sender_name", "sender_phone"}
 
     if state.get("intent") == "create_order" and checkout_fields & set(missing):
-        extract_res = llm.invoke([
-            SystemMessage(content=KAPRU_SYSTEM_PROMPT),
-            HumanMessage(content=f"""Conversation so far: {state['messages'][-6:]}
-Latest user message: "{last_msg}"
 
-Extract any checkout details mentioned across the conversation. Return JSON:
-{{
-  "recipient_name": "" ,
-  "recipient_phone": "",
-  "sender_name": "",
-  "sender_phone": "",
-  "city": "",
-  "delivery_date": "",
-  "address": ""
-}}
-Rules:
-- Phone numbers are Sri Lankan: start with 07 and have 10 digits (e.g. 0771234567),
-  or +94 format. NEVER use a product ID (codes with letters/underscores like
-  EF_PC_ELEC...) as a phone number — those are NOT phones.
-- "name, phone" format like "sarath, 0771212121" -> fill name + phone
-- A line with a city + date like "Nugegoda, 2026-06-30" -> city + delivery_date
-- delivery_date must be YYYY-MM-DD
-- If sender said "same as sender" copy sender to recipient
-- Leave a field "" if not mentioned. Return ONLY the fields you are confident about.""")
-        ])
-        try:
-            info = parse_llm_json(extract_res.content)
-            if info.get("recipient_name"):
-                recipient["name"] = info["recipient_name"]
-            if info.get("recipient_phone"):
-                recipient["phone"] = info["recipient_phone"]
-            if info.get("sender_name"):
-                sender["name"] = info["sender_name"]
-            if info.get("sender_phone"):
-                sender["phone"] = info["sender_phone"]
-            if info.get("city"):
-                delivery_info["city"] = info["city"]
-            if info.get("delivery_date"):
-                delivery_info["delivery_date"] = info["delivery_date"]
-            if info.get("address"):
-                delivery_info["address"] = info["address"]
+        # If form data already populated state, skip LLM extraction
+        already_have = (recipient.get("name") and recipient.get("phone")
+                        and sender.get("name") and delivery_info.get("address")
+                        and delivery_info.get("city") and delivery_info.get("delivery_date"))
+        if not already_have:        
+            extract_res = llm.invoke([
+                SystemMessage(content=KAPRU_SYSTEM_PROMPT),
+                HumanMessage(content=f"""Conversation so far: {state['messages'][-6:]}
+    Latest user message: "{last_msg}"
 
-            # Recompute what's still missing
-            if recipient.get("name"): missing = [m for m in missing if m != "recipient_name"]
-            if recipient.get("phone"): missing = [m for m in missing if m != "recipient_phone"]
-            if sender.get("name"): missing = [m for m in missing if m != "sender_name"]
-            if sender.get("phone"): missing = [m for m in missing if m != "sender_phone"]
-            if delivery_info.get("address"): missing = [m for m in missing if m != "address"]
-            if delivery_info.get("city"): missing = [m for m in missing if m != "city"]
-            if delivery_info.get("delivery_date"): missing = [m for m in missing if m != "delivery_date"]
-        except Exception as e:
-            print(f"[CHECKOUT PARSE ERROR] {e}")
+    Extract any checkout details mentioned across the conversation. Return JSON:
+    {{
+    "recipient_name": "" ,
+    "recipient_phone": "",
+    "sender_name": "",
+    "sender_phone": "",
+    "city": "",
+    "delivery_date": "",
+    "address": ""
+    }}
+    Rules:
+    - Phone numbers are Sri Lankan: start with 07 and have 10 digits (e.g. 0771234567),
+    or +94 format. NEVER use a product ID (codes with letters/underscores like
+    EF_PC_ELEC...) as a phone number — those are NOT phones.
+    - "name, phone" format like "sarath, 0771212121" -> fill name + phone
+    - A line with a city + date like "Nugegoda, 2026-06-30" -> city + delivery_date
+    - delivery_date must be YYYY-MM-DD
+    - If sender said "same as sender" copy sender to recipient
+    - Leave a field "" if not mentioned. Return ONLY the fields you are confident about.""")
+            ])
+            try:
+                info = parse_llm_json(extract_res.content)
+                if info.get("recipient_name"):
+                    recipient["name"] = info["recipient_name"]
+                if info.get("recipient_phone"):
+                    recipient["phone"] = info["recipient_phone"]
+                if info.get("sender_name"):
+                    sender["name"] = info["sender_name"]
+                if info.get("sender_phone"):
+                    sender["phone"] = info["sender_phone"]
+                if info.get("city"):
+                    delivery_info["city"] = info["city"]
+                if info.get("delivery_date"):
+                    delivery_info["delivery_date"] = info["delivery_date"]
+                if info.get("address"):
+                    delivery_info["address"] = info["address"]
+
+                # Recompute what's still missing
+                if recipient.get("name"): missing = [m for m in missing if m != "recipient_name"]
+                if recipient.get("phone"): missing = [m for m in missing if m != "recipient_phone"]
+                if sender.get("name"): missing = [m for m in missing if m != "sender_name"]
+                if sender.get("phone"): missing = [m for m in missing if m != "sender_phone"]
+                if delivery_info.get("address"): missing = [m for m in missing if m != "address"]
+                if delivery_info.get("city"): missing = [m for m in missing if m != "city"]
+                if delivery_info.get("delivery_date"): missing = [m for m in missing if m != "delivery_date"]
+            except Exception as e:
+                print(f"[CHECKOUT PARSE ERROR] {e}")
+
+    # ── Recompute missing for create_order (runs for form OR text input) ──
+    if state.get("intent") == "create_order":
+        if recipient.get("name"):              missing = [m for m in missing if m != "recipient_name"]
+        if recipient.get("phone"):             missing = [m for m in missing if m != "recipient_phone"]
+        if sender.get("name"):                 missing = [m for m in missing if m != "sender_name"]
+        if delivery_info.get("address"):       missing = [m for m in missing if m != "address"]
+        if delivery_info.get("city"):          missing = [m for m in missing if m != "city"]
+        if delivery_info.get("delivery_date"): missing = [m for m in missing if m != "delivery_date"]
 
     # ── Step 4: Main reasoning decision ────────────────────────────
     prompt = f"""You are deciding the next action for Kapru,
@@ -589,6 +615,9 @@ async def tool_caller_node(state: ShoppingState) -> ShoppingState:
     result = None
     new_delivery = state.get("delivery_info", {})
 
+    # near the top, before try:
+    new_cached = state.get("cached_products", [])
+
     try:
         if tool_name == "kapruka_search_products":
             result = await tools.search_products(
@@ -600,6 +629,10 @@ async def tool_caller_node(state: ShoppingState) -> ShoppingState:
                 limit=params.get("limit", 6),
                 currency=params.get("currency", "LKR"),
             )
+
+            # ← Store fresh products into cache so responder can build cards
+            if isinstance(result, dict) and result.get("products"):
+                new_cached = result["products"]
 
         elif tool_name == "kapruka_get_product":
             result = await tools.get_product(
@@ -677,6 +710,7 @@ async def tool_caller_node(state: ShoppingState) -> ShoppingState:
     return {
         **state,
         "last_tool_result": result,
+        "cached_products": new_cached,        # ← add this
         "delivery_info": new_delivery,
         "current_step": state["current_step"] + 1,
         "retry_count": retry,
@@ -823,6 +857,44 @@ Return JSON: {{"message": "..."}}""")
             "submit_label": "Confirm Order",
         }
         print(f"\n📤 [RESPONDER] type=input_form fields={len(fields)}")
+        return {**state, "response": response}
+
+    # ── Product cards: build in code (reliable url + image), LLM writes only the message ──
+    cached = state.get("cached_products", [])
+    action = decision.get("action", "")
+
+    if cached and action == "respond" and not state.get("missing_info"):
+        # Ask Gemini ONLY for a short message + cross-sell quick replies (small, safe)
+        try:
+            msg_res = llm_creative.invoke([
+                SystemMessage(content=KAPRU_SYSTEM_PROMPT),
+                HumanMessage(content=f"""Products were found for the user. Write a short warm
+intro line in {lang_label} (one emoji) and 3 cross-sell quick replies based on
+the product type (e.g. phone -> case/earbuds; cake -> candles/card).
+Return JSON: {{"message": "...", "quick_replies": ["...","...","..."]}}""")
+            ])
+            md = parse_llm_json(msg_res.content)
+        except Exception:
+            md = {"message": "Here are some great options! 😊", "quick_replies": []}
+
+        # Build cards from cached products — deterministic, never truncated
+        products = [{
+            "id": p.get("product_id", ""),
+            "name": p.get("name", ""),
+            "price": p.get("price", 0),
+            "image": p.get("image", ""),
+            "url": p.get("url", ""),              # ← clickable name target
+            "rating": 4.5,
+            "badge": "",
+        } for p in cached[:6]]
+
+        response = {
+            "type": "product_cards",
+            "message": md.get("message", "Here are some options! 😊"),
+            "products": products,
+            "quick_replies": md.get("quick_replies", []),
+        }
+        print(f"\n📤 [RESPONDER] type=product_cards ({len(products)} items)")
         return {**state, "response": response}
 
     # Prefer cached products for product_cards when available
