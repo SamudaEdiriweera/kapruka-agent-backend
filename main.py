@@ -30,13 +30,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://kapru.ai",
+        "https://kapruka-agent-eosin.vercel.app",   # ← your Vercel frontend
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",   # ← Vercel preview deploys
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
-
 # ------- ROUTES --------------------
 app.include_router(router, prefix="/api")
 
