@@ -63,6 +63,24 @@ LANG_LABELS = {
     "ta-tl": "Tanglish (Tamil written using English letters)",
 }
 
+KAPRUKA_CATEGORIES = [
+    "Automobile", "Ayurvedic", "Bicycle", "Books", "Chocolates", "Clothing",
+    "combopack", "Cosmetics", "Curd", "Electronic", "Fashion", "Fruits",
+    "Giftcert", "Giftset", "GreetingCards", "Grocery", "Household", "Jewellery",
+    "KidsToys", "Liquor", "BabyItems", "party", "Perfumes", "Pet", "Pharmacy",
+    "pirikara", "Childrens", "Schoolpride", "Softtoy", "Sports", "Vegetables",
+    "Adult Products", "thaipongle", "teachersday", "samedaydelivery",
+    "bestsellers", "diwali", "newadditions", "graduation", "valentine",
+    "newyear_january", "fathersday", "childrensday", "christmas", "anniversary",
+    "birthday", "bridetobe", "corporate", "lover", "momtobe", "mother",
+    "sympathies", "uniquegifts", "wedding", "womenday", "youandme", "household",
+    "ornaments", "promotions", "cakes", "flowers", "Personalized Gifts",
+    "halloween", "Services", "Food",
+]
+
+# Comma-separated string for prompts
+CATEGORIES_STR = ", ".join(KAPRUKA_CATEGORIES)
+
 
 KAPRU_SYSTEM_PROMPT = """You are Kapru, a warm and clever Sri Lankan shopping assistant for Kapruka.
 
@@ -173,6 +191,9 @@ async def detector_node(state: ShoppingState) -> ShoppingState:
 Recent conversation: {state['messages'][-4:]}
 Current cart has {len(state.get('cart', []))} item(s).
 
+Kapruka sells these REAL categories:
+{CATEGORIES_STR}
+
 Return JSON:
 {{
     "language": "detect and label as one of: en (English), si (Sinhala script),
@@ -191,7 +212,13 @@ Language detection examples:
 
 Rules for missing_info:
 Intent rules:
-- buying/searching a clear product (names a product) -> search_product
+- buying/searching ANY product or category above (phone, groceries, rice,
+  vegetables, cake, flowers, chocolates, liquor, medicine, baby items, etc.)
+  -> search_product
+- map everyday terms to real categories: "groceries"->Grocery, "rice"->Grocery,
+  "veggies"->Vegetables, "booze"->Liquor, "medicine"->Pharmacy, "toys"->KidsToys
+- NEVER assume something is unavailable — Kapruka has a huge catalog. When in
+  doubt, treat it as search_product so we actually search.
 - needs ADVICE, unsure what to buy, or emotional situation
   ("I broke up", "what should I get my mom", "help me decide", "any ideas",
    "I'm feeling...", "what do you suggest") -> get_advice
@@ -932,6 +959,13 @@ text (for general messages):
 {{"type":"text","message":"..."}}
 
 When building product_cards, map each cached product: id=product_id, name=name, price=price.
+
+CATALOG HONESTY (critical):
+- Kapruka has a HUGE catalog: {CATEGORIES_STR}.
+- NEVER tell the user something isn't available based on your own assumption.
+- If you're unsure whether Kapruka has something, the system will search for it.
+  Only state something is unavailable if a real search returned zero results.
+- Example: groceries, rice, vegetables, medicine, baby items ARE available.
 
 EMOTIONAL INTELLIGENCE:
 - Read the situation behind the request, not just keywords.
