@@ -226,7 +226,10 @@ Intent rules:
 - "show cart", "my cart", "view cart" -> view_cart
 - "checkout", "place order", "buy now", "confirm order", "I'm ready" -> create_order
 - giving name/phone/address/city during a checkout -> create_order
-- "track order" or an order number -> track_order"""
+- "track order" or an order number -> track_order
+
+- gibberish, random characters, or unclear input ("hhhhh", "asdfgh", 
+  empty-ish) -> intent: "general"""
 
     res = llm.invoke([
         SystemMessage(content=KAPRU_SYSTEM_PROMPT),
@@ -406,8 +409,15 @@ Rules:
     if "price_range" in missing and intent == "search_product":
         subject_res = llm.invoke([
             SystemMessage(content=KAPRU_SYSTEM_PROMPT),
-            HumanMessage(content=f"""Extract only the product name from: "{last_msg}"
-Return plain text only. No explanation."""),
+            HumanMessage(content=f"""Extract the CORE product to search for from: "{last_msg}"
+
+Rules:
+- Strip qualifiers like age, breed, size, colour, condition — search the BROAD product.
+- "dog food for 12-year-old German Shepherd" -> "dog food"
+- "senior dog food" -> "dog food"
+- "red running shoes size 10" -> "shoes"
+- "birthday cake for my mom" -> "cake"
+- Return the simplest searchable product term, 1-3 words. Plain text only."""),
         ])
         subject = extract_text(subject_res.content)
 
@@ -471,8 +481,9 @@ Example: ["Under LKR 500", "LKR 500-2,000", "LKR 2,000-5,000", "Above LKR 5,000"
             else:
                 subject_res = llm.invoke([
                     SystemMessage(content=KAPRU_SYSTEM_PROMPT),
-                    HumanMessage(content=f"""Extract product name from: "{last_msg}"
-Return plain text only."""),
+                    HumanMessage(content=f"""Extract the CORE product (strip age/breed/size/colour
+qualifiers) from: "{last_msg}". E.g. "dog food for old German Shepherd" -> "dog food".
+Return the broad product term, 1-3 words. Plain text only."""),
                 ])
                 subject = extract_text(subject_res.content)
                 hints = await tools.get_price_range_hints(subject)
@@ -960,12 +971,17 @@ text (for general messages):
 
 When building product_cards, map each cached product: id=product_id, name=name, price=price.
 
-CATALOG HONESTY (critical):
+CATALOG HONESTY (critical — never violate):
 - Kapruka has a HUGE catalog: {CATEGORIES_STR}.
-- NEVER tell the user something isn't available based on your own assumption.
-- If you're unsure whether Kapruka has something, the system will search for it.
-  Only state something is unavailable if a real search returned zero results.
-- Example: groceries, rice, vegetables, medicine, baby items ARE available.
+- NEVER say "we don't have it", "out of stock", "not available", or "I checked/
+  double-checked our inventory" UNLESS the Last tool result above is literally empty.
+- You did NOT check any inventory yourself — you can ONLY report what the search returned.
+- If the user asks for a qualified item ("dog food for a senior German Shepherd",
+  "shoes for running"), IGNORE the qualifiers and recommend from the broader products
+  that were found (dog food, shoes). Do NOT refuse because no exact match exists.
+- If products were found (see Last tool result / cached products), you MUST show or
+  recommend them. Refusing when products exist is a serious error.
+- Example: groceries, rice, vegetables, medicine, dog food, baby items ARE available.
 
 EMOTIONAL INTELLIGENCE:
 - Read the situation behind the request, not just keywords.
