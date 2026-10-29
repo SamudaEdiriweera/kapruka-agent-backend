@@ -1,6 +1,6 @@
 <div align="center">
 
-# Kapru — AI Shopping Agent Backend
+# Kapru - AI Shopping Agent Backend
 
 **A multilingual, agentic shopping assistant for [Kapruka](https://www.kapruka.com), Sri Lanka's largest e-commerce platform.**
 
